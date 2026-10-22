@@ -102,23 +102,44 @@ func VirtualService(ctx context.Context, r client.Client, virtualServiceName, na
 
 // Reference: https://github.com/pwittrock/kubebuilder-workshop/blob/master/pkg/util/util.go
 
+// mergeStringMap merges keys/values from src into dst without deleting
+// keys that exist only in dst (set by other controllers, e.g. CNI sidecars).
+// Returns true if dst was changed.
+func mergeStringMap(dst *map[string]string, src map[string]string) bool {
+	changed := false
+	if len(src) == 0 {
+		return false
+	}
+	if *dst == nil {
+		*dst = map[string]string{}
+	}
+	for k, v := range src {
+		if (*dst)[k] != v {
+			(*dst)[k] = v
+			changed = true
+		}
+	}
+	return changed
+}
+
 // CopyStatefulSetFields copies the owned fields from one StatefulSet to another
 // Returns true if the fields copied from don't match to.
+//
+// NOTE (annotation-merge fix): labels and annotations are MERGED instead of
+// replaced. The upstream implementation assigned from.Labels/from.Annotations
+// directly, which wiped any labels/annotations added to the live object by
+// other controllers (e.g. CNI, istio, monitoring) on every reconcile, causing
+// update-fight loops. With the merge semantics below the controller still
+// adds/updates its own keys but never deletes foreign ones.
 func CopyStatefulSetFields(from, to *appsv1.StatefulSet) bool {
 	requireUpdate := false
-	for k, v := range to.Labels {
-		if from.Labels[k] != v {
-			requireUpdate = true
-		}
+	if mergeStringMap(&to.Labels, from.Labels) {
+		requireUpdate = true
 	}
-	to.Labels = from.Labels
 
-	for k, v := range to.Annotations {
-		if from.Annotations[k] != v {
-			requireUpdate = true
-		}
+	if mergeStringMap(&to.Annotations, from.Annotations) {
+		requireUpdate = true
 	}
-	to.Annotations = from.Annotations
 
 	if *from.Spec.Replicas != *to.Spec.Replicas {
 		*to.Spec.Replicas = *from.Spec.Replicas
@@ -133,21 +154,17 @@ func CopyStatefulSetFields(from, to *appsv1.StatefulSet) bool {
 	return requireUpdate
 }
 
+// CopyDeploymentSetFields follows the same merge semantics as
+// CopyStatefulSetFields (see the annotation-merge fix note there).
 func CopyDeploymentSetFields(from, to *appsv1.Deployment) bool {
 	requireUpdate := false
-	for k, v := range to.Labels {
-		if from.Labels[k] != v {
-			requireUpdate = true
-		}
+	if mergeStringMap(&to.Labels, from.Labels) {
+		requireUpdate = true
 	}
-	to.Labels = from.Labels
 
-	for k, v := range to.Annotations {
-		if from.Annotations[k] != v {
-			requireUpdate = true
-		}
+	if mergeStringMap(&to.Annotations, from.Annotations) {
+		requireUpdate = true
 	}
-	to.Annotations = from.Annotations
 
 	if from.Spec.Replicas != to.Spec.Replicas {
 		to.Spec.Replicas = from.Spec.Replicas
@@ -162,22 +179,23 @@ func CopyDeploymentSetFields(from, to *appsv1.Deployment) bool {
 	return requireUpdate
 }
 
-// CopyServiceFields copies the owned fields from one Service to another
+// CopyServiceFields copies the owned fields from one Service to another.
+//
+// NOTE (annotation-merge fix): labels and annotations are MERGED instead of
+// replaced (same semantics as CopyStatefulSetFields). The upstream code did
+// to.Annotations = from.Annotations, and since generateService() creates the
+// desired Service without any annotations, every reconcile wiped annotations
+// added by other controllers (e.g. OVN CNI) and pushed them back via Update,
+// creating an endless patch/update fight visible in the audit log.
 func CopyServiceFields(from, to *corev1.Service) bool {
 	requireUpdate := false
-	for k, v := range to.Labels {
-		if from.Labels[k] != v {
-			requireUpdate = true
-		}
+	if mergeStringMap(&to.Labels, from.Labels) {
+		requireUpdate = true
 	}
-	to.Labels = from.Labels
 
-	for k, v := range to.Annotations {
-		if from.Annotations[k] != v {
-			requireUpdate = true
-		}
+	if mergeStringMap(&to.Annotations, from.Annotations) {
+		requireUpdate = true
 	}
-	to.Annotations = from.Annotations
 
 	// Don't copy the entire Spec, because we can't overwrite the clusterIp field
 
