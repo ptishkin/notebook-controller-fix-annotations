@@ -1,0 +1,63 @@
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0 # need history to diff against the last import
+
+      - name: Run sync script
+        id: sync
+        run: |
+          set +e
+          bash scripts/sync-upstream.sh
+          code=$?
+          set -e
+          if [ $code -eq 0 ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase patch branch and run tests
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          git config user.name "sync-bot"
+          git config user.email "sync@noreply"
+          git checkout patch/merge-annotations
+          if ! git rebase main; then
+            echo "::warning::Rebase conflict — manual resolution required."
+            git rebase --abort
+            exit 1
+          fi
+          docker run --rm -v "$PWD":/src -w /src/notebook-controller \
+            golang:1.17 sh -c "go test ./tests/ -count=1 && go vet ./..."
+
+      - name: Push branches
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          git push origin main
+          git push origin patch/merge-annotations --force-with-lease
+
+      - name: Open PR if patch branch diverged from main
+        if: steps.sync.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: sync/summary
+          title: "sync: upstream v1.10-branch update"
+          body: |
+            Automated upstream sync. See commit history on `main`
+            (sync: upstream ...) and the rebased `patch/merge-annotations`.
+          delete-branch: true
